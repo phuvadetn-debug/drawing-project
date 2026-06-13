@@ -190,9 +190,43 @@ export default function App() {
     
     const rect = canvas.getBoundingClientRect();
     
-    // Unify mouse and touch positions relative to the canvas sizing box
-    const clientX = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
-    const clientY = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
+    // Retrieve coordinates from all possible sources to be 100% robust on mobile browsers
+    let clientX = null;
+    let clientY = null;
+
+    // 1. Try touches list on the react event (if touch event)
+    if (e.touches && e.touches[0]) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    } 
+    // 2. Try changedTouches list on the react event (for touchend/pointerup events)
+    else if (e.changedTouches && e.changedTouches[0]) {
+      clientX = e.changedTouches[0].clientX;
+      clientY = e.changedTouches[0].clientY;
+    } 
+    // 3. Try direct pointer/mouse properties on the react event
+    else if (e.clientX !== undefined && e.clientX !== null) {
+      clientX = e.clientX;
+      clientY = e.clientY;
+    } 
+    // 4. Try native event properties
+    else if (e.nativeEvent) {
+      const ne = e.nativeEvent;
+      if (ne.touches && ne.touches[0]) {
+        clientX = ne.touches[0].clientX;
+        clientY = ne.touches[0].clientY;
+      } else if (ne.changedTouches && ne.changedTouches[0]) {
+        clientX = ne.changedTouches[0].clientX;
+        clientY = ne.changedTouches[0].clientY;
+      } else if (ne.clientX !== undefined && ne.clientX !== null) {
+        clientX = ne.clientX;
+        clientY = ne.clientY;
+      }
+    }
+
+    // Fallback to 0 if no coordinates could be resolved
+    if (clientX === null) clientX = 0;
+    if (clientY === null) clientY = 0;
     
     const relativeX = (clientX - rect.left) / rect.width;
     const relativeY = (clientY - rect.top) / rect.height;
@@ -207,6 +241,15 @@ export default function App() {
     e.preventDefault();
     const canvas = canvasRef.current;
     if (!canvas) return;
+    
+    // Set pointer capture to track drawing outside canvas bounds on mobile/desktop
+    if (e.target && typeof e.target.setPointerCapture === 'function' && e.pointerId !== undefined) {
+      try {
+        e.target.setPointerCapture(e.pointerId);
+      } catch (err) {
+        console.warn("Failed to set pointer capture:", err);
+      }
+    }
     
     const ctx = canvas.getContext('2d');
     const coords = getCanvasCoords(e);
@@ -336,6 +379,16 @@ export default function App() {
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     smudgeRef.current = null;
+    
+    // Release pointer capture
+    if (e.target && typeof e.target.releasePointerCapture === 'function' && e.pointerId !== undefined) {
+      try {
+        e.target.releasePointerCapture(e.pointerId);
+      } catch (err) {
+        // Ignore
+      }
+    }
+    
     saveState();
   };
 
@@ -394,7 +447,7 @@ export default function App() {
     'checkerboard-bg';
 
   return (
-    <div className="w-full h-full flex flex-col md:flex-row relative overflow-hidden bg-slate-950 text-slate-100">
+    <div className="w-full h-full flex flex-col md:flex-row relative overflow-y-auto md:overflow-hidden bg-slate-950 text-slate-100">
       
       {/* BACKGROUND EFFECTS */}
       <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-sky-500/10 blur-[150px] pointer-events-none" />
@@ -504,7 +557,7 @@ export default function App() {
       </main>
 
       {/* RIGHT SIDE PANEL: CONTROLS & COLORS */}
-      <aside className="z-20 md:absolute md:right-4 md:top-1/2 md:-translate-y-1/2 p-4 md:py-6 md:px-4 glass-panel md:rounded-2xl shadow-xl w-full md:w-80 flex flex-col gap-5 border-t md:border-t-0 border-slate-800 md:max-h-[85vh] overflow-y-auto">
+      <aside className="z-20 md:absolute md:right-4 md:top-1/2 md:-translate-y-1/2 p-4 pb-28 md:py-6 md:px-4 md:pb-6 glass-panel md:rounded-2xl shadow-xl w-full md:w-80 flex flex-col gap-5 border-t md:border-t-0 border-slate-800 md:max-h-[85vh] overflow-y-auto">
         
         {/* SECTION 1: BRUSH SETTINGS */}
         <div>
@@ -581,7 +634,8 @@ export default function App() {
                 <div className="flex-1 flex justify-center items-center h-12 bg-slate-950/40 rounded-lg relative overflow-hidden checkerboard-bg">
                   {/* Inside container to render correct color and opacity */}
                   <div 
-                    className="rounded-full shadow-sm"
+                    key={`${tool}-${color}-${brushSize}-${opacity}`}
+                    className="rounded-full shadow-sm animate-in fade-in duration-150"
                     style={{
                       width: `${Math.max(2, brushSize)}px`,
                       height: `${Math.max(2, brushSize)}px`,
