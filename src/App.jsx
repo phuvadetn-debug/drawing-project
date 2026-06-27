@@ -16,7 +16,11 @@ import {
   Palette,
   Hand,
   Maximize,
-  Menu
+  Menu,
+  Pencil as PencilIcon,
+  Droplet as WaterIcon,
+  Brush as OilIcon,
+  SprayCan as SprayIcon
 } from 'lucide-react';
 import { performFloodFill, createSmudgeBuffer, applySmudge } from './canvas-utils';
 
@@ -46,7 +50,7 @@ const CANVAS_HEIGHT = 800;
 
 export default function App() {
   // --- STATE ---
-  const [tool, setTool] = useState('pen'); // 'pen', 'brush', 'blend', 'bucket', 'eraser', 'hand'
+  const [tool, setTool] = useState('pen'); // 'pencil', 'pen', 'brush', 'watercolor', 'oil', 'spray', 'blend', 'bucket', 'eraser', 'hand'
   const [color, setColor] = useState('#38bdf8'); // Cyan/Sky blue as default
   const [brushSize, setBrushSize] = useState(8);
   const [opacity, setOpacity] = useState(0.9);
@@ -83,6 +87,11 @@ export default function App() {
   const gestureStartZoomRef = useRef(1);
   const gestureStartPanRef = useRef({ x: 0, y: 0 });
   const gestureActiveRef = useRef(false);
+
+  // Speed and Spray Can pressure refs
+  const lastTimeRef = useRef(performance.now());
+  const sprayIntervalRef = useRef(null);
+  const lastPressureRef = useRef(0.5);
 
   // Check localStorage for onboarding visited
   useEffect(() => {
@@ -302,6 +311,10 @@ export default function App() {
       return;
     }
     
+    lastTimeRef.current = performance.now();
+    const startPressure = e.pressure !== 0 && e.pressure !== 0.5 ? e.pressure : 0.5;
+    lastPressureRef.current = startPressure;
+    
     if (tool === 'blend') {
       smudgeRef.current = createSmudgeBuffer(canvas, coords.x * dpr, coords.y * dpr, brushSize * dpr);
     }
@@ -310,23 +323,93 @@ export default function App() {
     if (tool === 'eraser') {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.globalAlpha = 1.0;
+      ctx.beginPath();
+      ctx.arc(coords.x, coords.y, (brushSize * startPressure) / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (tool === 'pencil') {
+      ctx.globalCompositeOperation = 'source-over';
+      const pWidth = brushSize * (0.3 + 0.7 * startPressure);
+      ctx.globalAlpha = opacity * startPressure * 0.7;
+      ctx.fillStyle = color;
+      const numDots = Math.ceil(pWidth * 1.5);
+      for (let i = 0; i < numDots; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const r = Math.random() * (pWidth / 2);
+        ctx.fillRect(coords.x + Math.cos(angle) * r, coords.y + Math.sin(angle) * r, 1, 1);
+      }
+    } else if (tool === 'pen') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = opacity;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(coords.x, coords.y, (brushSize * startPressure) / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (tool === 'brush') {
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = opacity * (0.4 + 0.6 * startPressure);
+      ctx.fillStyle = color;
+      ctx.shadowBlur = brushSize * 0.15;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.arc(coords.x, coords.y, (brushSize * (0.4 + 0.6 * startPressure)) / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (tool === 'watercolor') {
+      ctx.globalCompositeOperation = 'source-over';
+      const wWidth = brushSize * (0.5 + 0.5 * startPressure);
+      ctx.globalAlpha = opacity * startPressure * 0.35;
+      ctx.fillStyle = color;
+      ctx.shadowBlur = wWidth * 0.6;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.arc(coords.x, coords.y, wWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (tool === 'oil') {
+      ctx.globalCompositeOperation = 'source-over';
+      const oWidth = brushSize * (0.6 + 0.4 * startPressure);
+      ctx.fillStyle = color;
+      const numBristles = Math.max(3, Math.min(8, Math.floor(brushSize / 2)));
+      for (let i = 0; i < numBristles; i++) {
+        const offset = ((i / (numBristles - 1)) - 0.5) * oWidth;
+        ctx.globalAlpha = opacity * (0.2 + 0.6 * Math.random()) * startPressure;
+        ctx.beginPath();
+        ctx.arc(coords.x + offset, coords.y, Math.max(0.5, oWidth / 8), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else if (tool === 'spray') {
+      const radius = brushSize * (0.8 + 0.6 * startPressure);
+      const numDots = Math.floor(15 * startPressure);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = opacity;
+      for (let i = 0; i < numDots; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const r = Math.random() * radius;
+        const dotX = coords.x + Math.cos(angle) * r;
+        const dotY = coords.y + Math.sin(angle) * r;
+        ctx.fillRect(dotX, dotY, 1.5, 1.5);
+      }
+
+      sprayIntervalRef.current = setInterval(() => {
+        const currentCoords = lastCoordsRef.current;
+        const currentPressure = lastPressureRef.current;
+        const radiusVal = brushSize * (0.8 + 0.6 * currentPressure);
+        const numDotsVal = Math.floor(15 * currentPressure);
+        const canvasObj = canvasRef.current;
+        if (!canvasObj) return;
+        const currentCtx = canvasObj.getContext('2d');
+        currentCtx.save();
+        currentCtx.fillStyle = color;
+        currentCtx.globalAlpha = opacity;
+        for (let i = 0; i < numDotsVal; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const r = Math.random() * radiusVal;
+          const dotX = currentCoords.x + Math.cos(angle) * r;
+          const dotY = currentCoords.y + Math.sin(angle) * r;
+          currentCtx.fillRect(dotX, dotY, 1.5, 1.5);
+        }
+        currentCtx.restore();
+      }, 30);
     } else if (tool === 'blend') {
       applySmudge(ctx, canvas, coords.x, coords.y, smudgeRef.current, opacity * 0.4);
-    } else {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = tool === 'brush' ? opacity : 1.0;
-      ctx.fillStyle = color;
-      
-      if (tool === 'brush') {
-        ctx.shadowBlur = brushSize * 0.15;
-        ctx.shadowColor = color;
-      }
-    }
-    
-    if (tool !== 'blend') {
-      ctx.beginPath();
-      ctx.arc(coords.x, coords.y, brushSize / 2, 0, Math.PI * 2);
-      ctx.fill();
     }
     ctx.restore();
   };
@@ -388,6 +471,25 @@ export default function App() {
     const ctx = canvas.getContext('2d');
     const coords = getCanvasCoords(e);
     const lastCoords = lastCoordsRef.current;
+
+    // Calculate speed and pressure
+    const now = performance.now();
+    const dt = Math.max(1, now - lastTimeRef.current);
+    const dx = coords.x - lastCoords.x;
+    const dy = coords.y - lastCoords.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const speed = dist / dt;
+
+    let pressure = e.pressure;
+    const hasHardwarePressure = e.pressure !== 0 && e.pressure !== 0.5 && e.pointerType !== 'mouse';
+    if (!hasHardwarePressure) {
+      // Speed-based simulated pressure: drawing faster makes it thinner
+      const speedFactor = 0.15;
+      pressure = Math.max(0.15, Math.min(1.0, 1.0 - speed * speedFactor));
+    }
+    
+    lastTimeRef.current = now;
+    lastPressureRef.current = pressure;
     
     ctx.save();
     
@@ -395,7 +497,7 @@ export default function App() {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.globalAlpha = 1.0;
       ctx.strokeStyle = '#000000';
-      ctx.lineWidth = brushSize;
+      ctx.lineWidth = brushSize * pressure;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       
@@ -404,11 +506,45 @@ export default function App() {
       ctx.lineTo(coords.x, coords.y);
       ctx.stroke();
       
+    } else if (tool === 'pencil') {
+      ctx.globalCompositeOperation = 'source-over';
+      const pWidth = brushSize * (0.3 + 0.7 * pressure);
+      const pOpacity = opacity * pressure * 0.7;
+      
+      ctx.strokeStyle = color;
+      ctx.lineWidth = pWidth;
+      ctx.globalAlpha = pOpacity;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      ctx.beginPath();
+      ctx.moveTo(lastCoords.x, lastCoords.y);
+      ctx.lineTo(coords.x, coords.y);
+      ctx.stroke();
+      
+      // Pencil grain effect
+      ctx.globalAlpha = pOpacity * 0.5;
+      ctx.fillStyle = color;
+      const steps = Math.max(1, Math.floor(dist));
+      for (let s = 0; s <= steps; s += 2) {
+        const t = s / steps;
+        const x = lastCoords.x + dx * t;
+        const y = lastCoords.y + dy * t;
+        const numDots = Math.ceil(pWidth * 0.5);
+        for (let i = 0; i < numDots; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const r = Math.random() * (pWidth / 2);
+          const jx = Math.cos(angle) * r;
+          const jy = Math.sin(angle) * r;
+          ctx.fillRect(x + jx, y + jy, 1, 1);
+        }
+      }
+      
     } else if (tool === 'pen') {
       ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1.0;
+      ctx.globalAlpha = opacity;
       ctx.strokeStyle = color;
-      ctx.lineWidth = brushSize;
+      ctx.lineWidth = brushSize * pressure;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       
@@ -419,9 +555,9 @@ export default function App() {
       
     } else if (tool === 'brush') {
       ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = opacity;
+      ctx.globalAlpha = opacity * (0.4 + 0.6 * pressure);
       ctx.strokeStyle = color;
-      ctx.lineWidth = brushSize;
+      ctx.lineWidth = brushSize * (0.4 + 0.6 * pressure);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       
@@ -433,12 +569,67 @@ export default function App() {
       ctx.lineTo(coords.x, coords.y);
       ctx.stroke();
       
+    } else if (tool === 'watercolor') {
+      ctx.globalCompositeOperation = 'source-over';
+      const wWidth = brushSize * (0.5 + 0.5 * pressure);
+      const wOpacity = opacity * pressure * 0.35;
+      
+      ctx.strokeStyle = color;
+      ctx.lineWidth = wWidth;
+      ctx.globalAlpha = wOpacity;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      ctx.shadowBlur = wWidth * 0.6;
+      ctx.shadowColor = color;
+      
+      ctx.beginPath();
+      ctx.moveTo(lastCoords.x, lastCoords.y);
+      ctx.lineTo(coords.x, coords.y);
+      ctx.stroke();
+      
+    } else if (tool === 'oil') {
+      ctx.globalCompositeOperation = 'source-over';
+      const oWidth = brushSize * (0.6 + 0.4 * pressure);
+      
+      let nx = 0;
+      let ny = 0;
+      if (dist > 0) {
+        nx = -dy / dist;
+        ny = dx / dist;
+      } else {
+        nx = 1;
+        ny = 0;
+      }
+      
+      const numBristles = Math.max(3, Math.min(8, Math.floor(brushSize / 2)));
+      for (let i = 0; i < numBristles; i++) {
+        const offset = ((i / (numBristles - 1)) - 0.5) * oWidth;
+        ctx.beginPath();
+        ctx.moveTo(lastCoords.x + nx * offset, lastCoords.y + ny * offset);
+        ctx.lineTo(coords.x + nx * offset, coords.y + ny * offset);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1.0, oWidth / 4);
+        ctx.globalAlpha = opacity * (0.2 + 0.6 * Math.random()) * pressure;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+      
+    } else if (tool === 'spray') {
+      const radius = brushSize * (0.8 + 0.6 * pressure);
+      const numDots = Math.floor(8 * pressure);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = opacity;
+      for (let i = 0; i < numDots; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const r = Math.random() * radius;
+        const dotX = coords.x + Math.cos(angle) * r;
+        const dotY = coords.y + Math.sin(angle) * r;
+        ctx.fillRect(dotX, dotY, 1.5, 1.5);
+      }
+      
     } else if (tool === 'blend') {
       if (!smudgeRef.current) return;
-      
-      const dx = coords.x - lastCoords.x;
-      const dy = coords.y - lastCoords.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
       
       const steps = Math.max(1, Math.floor(dist / (brushSize / 4)));
       
@@ -446,7 +637,7 @@ export default function App() {
         const t = i / steps;
         const ix = lastCoords.x + dx * t;
         const iy = lastCoords.y + dy * t;
-        applySmudge(ctx, canvas, ix, iy, smudgeRef.current, opacity * 0.45);
+        applySmudge(ctx, canvas, ix, iy, smudgeRef.current, opacity * 0.45 * pressure);
       }
     }
     
@@ -459,6 +650,12 @@ export default function App() {
     
     // Remove pointer from tracking map
     activePointersRef.current.delete(e.pointerId);
+    
+    // Clear spray interval if active
+    if (sprayIntervalRef.current) {
+      clearInterval(sprayIntervalRef.current);
+      sprayIntervalRef.current = null;
+    }
     
     // --- PAN/ZOOM MODE (HAND TOOL) ---
     if (tool === 'hand') {
@@ -619,11 +816,20 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex md:flex-col gap-2 items-center">
+        <div className="flex md:flex-col gap-2 items-center overflow-x-auto max-w-full py-1 no-scrollbar scroll-smooth">
+          {/* Pencil */}
+          <button
+            onClick={() => setTool('pencil')}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'pencil' ? 'glass-btn-active scale-105' : ''}`}
+            title="Pencil (ดินสอ)"
+          >
+            <PencilIcon className="w-5 h-5" />
+          </button>
+
           {/* Line-Art Pen */}
           <button
             onClick={() => setTool('pen')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'pen' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'pen' ? 'glass-btn-active scale-105' : ''}`}
             title="Line-Art Pen (ปากกาตัดเส้น)"
           >
             <PenTool className="w-5 h-5" />
@@ -632,16 +838,43 @@ export default function App() {
           {/* Paintbrush */}
           <button
             onClick={() => setTool('brush')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'brush' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'brush' ? 'glass-btn-active scale-105' : ''}`}
             title="Paintbrush (พู่กัน)"
           >
             <BrushIcon className="w-5 h-5" />
           </button>
 
+          {/* Watercolor */}
+          <button
+            onClick={() => setTool('watercolor')}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'watercolor' ? 'glass-btn-active scale-105' : ''}`}
+            title="Watercolor Brush (พู่กันสีน้ำ)"
+          >
+            <WaterIcon className="w-5 h-5" />
+          </button>
+
+          {/* Oil */}
+          <button
+            onClick={() => setTool('oil')}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'oil' ? 'glass-btn-active scale-105' : ''}`}
+            title="Oil Brush (พู่กันสีน้ำมัน)"
+          >
+            <OilIcon className="w-5 h-5" />
+          </button>
+
+          {/* Spray Can */}
+          <button
+            onClick={() => setTool('spray')}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'spray' ? 'glass-btn-active scale-105' : ''}`}
+            title="Spray Can (สเปรย์)"
+          >
+            <SprayIcon className="w-5 h-5" />
+          </button>
+
           {/* Blending Pen */}
           <button
             onClick={() => setTool('blend')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'blend' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'blend' ? 'glass-btn-active scale-105' : ''}`}
             title="Blending Pen (ปากกาผสมสี)"
           >
             <Blend className="w-5 h-5" />
@@ -650,7 +883,7 @@ export default function App() {
           {/* Paint Bucket */}
           <button
             onClick={() => setTool('bucket')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'bucket' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'bucket' ? 'glass-btn-active scale-105' : ''}`}
             title="Paint Bucket (ถังสี)"
           >
             <BucketIcon className="w-5 h-5" />
@@ -659,7 +892,7 @@ export default function App() {
           {/* Eraser */}
           <button
             onClick={() => setTool('eraser')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'eraser' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'eraser' ? 'glass-btn-active scale-105' : ''}`}
             title="Eraser (ยางลบ)"
           >
             <EraserIcon className="w-5 h-5" />
@@ -668,7 +901,7 @@ export default function App() {
           {/* Hand Tool (Pan/Zoom) */}
           <button
             onClick={() => setTool('hand')}
-            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'hand' ? 'glass-btn-active scale-105' : ''}`}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn shrink-0 ${tool === 'hand' ? 'glass-btn-active scale-105' : ''}`}
             title="Pan & Zoom Mode (โหมดซูม/ย้าย)"
           >
             <Hand className="w-5 h-5" />
@@ -745,8 +978,12 @@ export default function App() {
               <Info className="w-3.5 h-3.5 text-sky-400" /> Brush Settings
             </span>
             <div className="text-[10px] bg-sky-500/10 text-sky-400 font-bold px-2 py-0.5 rounded-full border border-sky-500/20 uppercase">
-              {tool === 'pen' && 'Line Pen'}
+              {tool === 'pencil' && 'Pencil'}
+              {tool === 'pen' && 'Calligraphy Pen'}
               {tool === 'brush' && 'Paintbrush'}
+              {tool === 'watercolor' && 'Watercolor'}
+              {tool === 'oil' && 'Oil Brush'}
+              {tool === 'spray' && 'Spray Can'}
               {tool === 'blend' && 'Blending'}
               {tool === 'bucket' && 'Bucket Fill'}
               {tool === 'eraser' && 'Eraser'}
@@ -772,8 +1009,8 @@ export default function App() {
               </div>
             )}
 
-            {/* Opacity Slider (Only relevant for Paintbrush, Blending, and Paint Bucket opacity) */}
-            {(tool === 'brush' || tool === 'blend' || tool === 'bucket') && (
+            {/* Opacity Slider */}
+            {tool !== 'eraser' && tool !== 'hand' && (
               <div>
                 <div className="flex justify-between text-xs mb-1">
                   <span className="text-slate-400">Opacity / Strength</span>
