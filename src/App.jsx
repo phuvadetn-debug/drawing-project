@@ -13,7 +13,10 @@ import {
   X,
   Sparkles,
   Info,
-  Palette
+  Palette,
+  Hand,
+  Maximize,
+  Menu
 } from 'lucide-react';
 import { performFloodFill, createSmudgeBuffer, applySmudge } from './canvas-utils';
 
@@ -43,7 +46,7 @@ const CANVAS_HEIGHT = 800;
 
 export default function App() {
   // --- STATE ---
-  const [tool, setTool] = useState('pen'); // 'pen', 'brush', 'blend', 'bucket', 'eraser'
+  const [tool, setTool] = useState('pen'); // 'pen', 'brush', 'blend', 'bucket', 'eraser', 'hand'
   const [color, setColor] = useState('#38bdf8'); // Cyan/Sky blue as default
   const [brushSize, setBrushSize] = useState(8);
   const [opacity, setOpacity] = useState(0.9);
@@ -58,6 +61,12 @@ export default function App() {
   const [canRedo, setCanRedo] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
+  // Canvas Zoom / Pan states
+  const [zoom, setZoom] = useState(1);
+  const [panX, setPanX] = useState(0);
+  const [panY, setPanY] = useState(0);
+  const [showToolbar, setShowToolbar] = useState(true);
+
   // --- REFS ---
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -66,6 +75,14 @@ export default function App() {
   const isDrawingRef = useRef(false);
   const lastCoordsRef = useRef({ x: 0, y: 0 });
   const smudgeRef = useRef(null);
+
+  // Gesture and Pointer Lock refs
+  const primaryPointerIdRef = useRef(null);
+  const activePointersRef = useRef(new Map());
+  const gestureStartDistRef = useRef(0);
+  const gestureStartZoomRef = useRef(1);
+  const gestureStartPanRef = useRef({ x: 0, y: 0 });
+  const gestureActiveRef = useRef(false);
 
   // Check localStorage for onboarding visited
   useEffect(() => {
@@ -183,7 +200,7 @@ export default function App() {
     setShowClearConfirm(false);
   };
 
-  // --- DRAWING LOGIC ---
+  // --- DRAWING LOGIC & GESTURES ---
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -194,23 +211,16 @@ export default function App() {
     let clientX = null;
     let clientY = null;
 
-    // 1. Try touches list on the react event (if touch event)
     if (e.touches && e.touches[0]) {
       clientX = e.touches[0].clientX;
       clientY = e.touches[0].clientY;
-    } 
-    // 2. Try changedTouches list on the react event (for touchend/pointerup events)
-    else if (e.changedTouches && e.changedTouches[0]) {
+    } else if (e.changedTouches && e.changedTouches[0]) {
       clientX = e.changedTouches[0].clientX;
       clientY = e.changedTouches[0].clientY;
-    } 
-    // 3. Try direct pointer/mouse properties on the react event
-    else if (e.clientX !== undefined && e.clientX !== null) {
+    } else if (e.clientX !== undefined && e.clientX !== null) {
       clientX = e.clientX;
       clientY = e.clientY;
-    } 
-    // 4. Try native event properties
-    else if (e.nativeEvent) {
+    } else if (e.nativeEvent) {
       const ne = e.nativeEvent;
       if (ne.touches && ne.touches[0]) {
         clientX = ne.touches[0].clientX;
@@ -224,7 +234,6 @@ export default function App() {
       }
     }
 
-    // Fallback to 0 if no coordinates could be resolved
     if (clientX === null) clientX = 0;
     if (clientY === null) clientY = 0;
     
@@ -242,7 +251,34 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
-    // Set pointer capture to track drawing outside canvas bounds on mobile/desktop
+    // Track active pointer contacts
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    
+    // --- PAN/ZOOM MODE (HAND TOOL) ---
+    if (tool === 'hand') {
+      if (activePointersRef.current.size === 1) {
+        gestureStartPanRef.current = { x: panX, y: panY };
+        lastCoordsRef.current = { x: e.clientX, y: e.clientY };
+      } else if (activePointersRef.current.size === 2) {
+        const pointers = Array.from(activePointersRef.current.values());
+        const dist = Math.hypot(pointers[0].x - pointers[1].x, pointers[0].y - pointers[1].y);
+        gestureStartDistRef.current = dist;
+        gestureStartZoomRef.current = zoom;
+        gestureStartPanRef.current = { x: panX, y: panY };
+        gestureActiveRef.current = false; // Threshold not yet reached
+      }
+      return;
+    }
+
+    // --- DRAWING MODE ---
+    // Lock-on Feature: Ignore all secondary touches once drawing begins
+    if (primaryPointerIdRef.current !== null) {
+      return;
+    }
+    
+    primaryPointerIdRef.current = e.pointerId;
+    
+    // Set pointer capture to track drawing outside canvas bounds
     if (e.target && typeof e.target.setPointerCapture === 'function' && e.pointerId !== undefined) {
       try {
         e.target.setPointerCapture(e.pointerId);
@@ -262,6 +298,7 @@ export default function App() {
       performFloodFill(canvas, coords.x * dpr, coords.y * dpr, color, opacity, tolerance);
       saveState();
       isDrawingRef.current = false;
+      primaryPointerIdRef.current = null;
       return;
     }
     
@@ -269,20 +306,17 @@ export default function App() {
       smudgeRef.current = createSmudgeBuffer(canvas, coords.x * dpr, coords.y * dpr, brushSize * dpr);
     }
     
-    // Draw a single initial dot on mouse down (handles simple clicks)
     ctx.save();
     if (tool === 'eraser') {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.globalAlpha = 1.0;
     } else if (tool === 'blend') {
-      // Blending starts smudging canvas pixels directly
       applySmudge(ctx, canvas, coords.x, coords.y, smudgeRef.current, opacity * 0.4);
     } else {
       ctx.globalCompositeOperation = 'source-over';
       ctx.globalAlpha = tool === 'brush' ? opacity : 1.0;
       ctx.fillStyle = color;
       
-      // Soft brush edge forPaintbrush clicks
       if (tool === 'brush') {
         ctx.shadowBlur = brushSize * 0.15;
         ctx.shadowColor = color;
@@ -298,8 +332,57 @@ export default function App() {
   };
 
   const handlePointerMove = (e) => {
-    if (!isDrawingRef.current) return;
     e.preventDefault();
+    
+    // Update active pointers map
+    if (activePointersRef.current.has(e.pointerId)) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    
+    // --- PAN/ZOOM MODE (HAND TOOL) ---
+    if (tool === 'hand') {
+      // 1 pointer active: Pan / Drag canvas sheet
+      if (activePointersRef.current.size === 1) {
+        const last = lastCoordsRef.current;
+        if (last) {
+          const dx = e.clientX - last.x;
+          const dy = e.clientY - last.y;
+          setPanX(px => px + dx);
+          setPanY(py => py + dy);
+          lastCoordsRef.current = { x: e.clientX, y: e.clientY };
+        }
+      } 
+      // 2 pointers active: Pinch to zoom
+      else if (activePointersRef.current.size === 2) {
+        const pointers = Array.from(activePointersRef.current.values());
+        const dist = Math.hypot(pointers[0].x - pointers[1].x, pointers[0].y - pointers[1].y);
+        const startDist = gestureStartDistRef.current;
+        
+        if (startDist > 0) {
+          const deltaDist = Math.abs(dist - startDist);
+          
+          // Gestures Dead Zone / Threshold: Only scale if distance changed by > 15px
+          if (!gestureActiveRef.current && deltaDist > 15) {
+            gestureActiveRef.current = true;
+          }
+          
+          if (gestureActiveRef.current) {
+            const scale = dist / startDist;
+            const newZoom = Math.min(5.0, Math.max(0.4, gestureStartZoomRef.current * scale));
+            setZoom(newZoom);
+          }
+        }
+      }
+      return;
+    }
+
+    // --- DRAWING MODE ---
+    if (!isDrawingRef.current) return;
+    
+    // Lock-on Feature: Only respond to moves from the primary pointer ID
+    if (e.pointerId !== primaryPointerIdRef.current) {
+      return;
+    }
     
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -308,11 +391,10 @@ export default function App() {
     
     ctx.save();
     
-    // Brush style setup
     if (tool === 'eraser') {
       ctx.globalCompositeOperation = 'destination-out';
       ctx.globalAlpha = 1.0;
-      ctx.strokeStyle = '#000000'; // Ignored during destination-out but set for safety
+      ctx.strokeStyle = '#000000';
       ctx.lineWidth = brushSize;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -343,7 +425,6 @@ export default function App() {
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       
-      // Create a smooth feathered edge
       ctx.shadowBlur = brushSize * 0.15;
       ctx.shadowColor = color;
       
@@ -355,12 +436,10 @@ export default function App() {
     } else if (tool === 'blend') {
       if (!smudgeRef.current) return;
       
-      // Calculate distances for stroke step interpolation
       const dx = coords.x - lastCoords.x;
       const dy = coords.y - lastCoords.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      // Interpolate points so fast movements don't create visual gaps
       const steps = Math.max(1, Math.floor(dist / (brushSize / 4)));
       
       for (let i = 1; i <= steps; i++) {
@@ -376,9 +455,30 @@ export default function App() {
   };
 
   const handlePointerUp = (e) => {
-    if (!isDrawingRef.current) return;
+    e.preventDefault();
+    
+    // Remove pointer from tracking map
+    activePointersRef.current.delete(e.pointerId);
+    
+    // --- PAN/ZOOM MODE (HAND TOOL) ---
+    if (tool === 'hand') {
+      gestureActiveRef.current = false;
+      // If we still have 1 pointer active, reset its last panning start position to prevent jumps
+      if (activePointersRef.current.size === 1) {
+        const remainingPointer = Array.from(activePointersRef.current.entries())[0];
+        lastCoordsRef.current = { x: remainingPointer[1].x, y: remainingPointer[1].y };
+      }
+      return;
+    }
+
+    // --- DRAWING MODE ---
+    if (e.pointerId !== primaryPointerIdRef.current) {
+      return;
+    }
+    
     isDrawingRef.current = false;
     smudgeRef.current = null;
+    primaryPointerIdRef.current = null;
     
     // Release pointer capture
     if (e.target && typeof e.target.releasePointerCapture === 'function' && e.pointerId !== undefined) {
@@ -390,6 +490,37 @@ export default function App() {
     }
     
     saveState();
+  };
+
+  // --- MOUSE WHEEL ZOOM (NATIVE EVENT FOR PASSIVE OVERRIDE) ---
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleWheelNative = (e) => {
+      if (tool !== 'hand') return;
+      e.preventDefault();
+      const zoomFactor = 0.08;
+      let newZoom = zoom;
+      if (e.deltaY < 0) {
+        newZoom = Math.min(5.0, zoom + zoomFactor);
+      } else {
+        newZoom = Math.max(0.4, zoom - zoomFactor);
+      }
+      setZoom(newZoom);
+    };
+
+    canvas.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleWheelNative);
+    };
+  }, [tool, zoom]);
+
+  // --- RESET VIEW ---
+  const resetView = () => {
+    setZoom(1);
+    setPanX(0);
+    setPanY(0);
   };
 
   // --- SAVE / DOWNLOAD UTILITY ---
@@ -453,27 +584,40 @@ export default function App() {
       <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] rounded-full bg-sky-500/10 blur-[150px] pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-purple-500/10 blur-[120px] pointer-events-none" />
 
-      {/* TOP HEADER / BAR (DESKTOP) */}
-      <header className="absolute top-4 left-4 z-20 hidden md:flex items-center gap-3 py-2 px-4 rounded-full glass-panel shadow-lg select-none">
-        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 flex items-center justify-center shadow-md shadow-sky-500/20">
-          <Sparkles className="w-4 h-4 text-white" />
+      {/* TOP HEADER / BAR */}
+      <header className="absolute top-4 left-4 z-30 flex items-center gap-2.5 py-2 px-3.5 rounded-full glass-panel shadow-lg select-none border border-slate-800/40">
+        <button
+          onClick={() => setShowToolbar(!showToolbar)}
+          className={`p-1 rounded-lg hover:text-sky-400 hover:bg-slate-900/50 transition-all duration-150 cursor-pointer ${!showToolbar ? 'text-sky-400 animate-pulse' : 'text-slate-300'}`}
+          title={showToolbar ? "Hide Toolbar" : "Show Toolbar"}
+        >
+          <Menu className="w-4.5 h-4.5" />
+        </button>
+        <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 flex items-center justify-center shadow-md shadow-sky-500/20">
+          <Sparkles className="w-3.5 h-3.5 text-white" />
         </div>
-        <div>
-          <h1 className="text-sm font-semibold text-white tracking-wider">CanvasCraft</h1>
-          <p className="text-[10px] text-slate-400 font-medium uppercase tracking-widest mt-[-2px]">Studio Pro</p>
+        <div className="hidden sm:block">
+          <h1 className="text-xs font-semibold text-white tracking-wider">CanvasCraft</h1>
+          <p className="text-[9px] text-slate-400 font-medium uppercase tracking-widest mt-[-2px]">Studio Pro</p>
         </div>
       </header>
 
       {/* SIDEBAR: DRAWING TOOLS */}
-      <aside className="z-20 md:absolute md:left-4 md:top-1/2 md:-translate-y-1/2 flex md:flex-col items-center justify-between md:justify-center gap-3 p-3 md:py-5 md:px-3 glass-panel md:rounded-2xl shadow-xl w-full md:w-auto border-b md:border-b-0 border-slate-800">
+      <aside className={`z-20 md:absolute md:left-4 md:top-1/2 flex md:flex-col items-center justify-between md:justify-center gap-3 glass-panel md:rounded-2xl shadow-xl w-full md:w-auto border-b md:border-b-0 border-slate-800 transition-all duration-300 ease-in-out ${
+        showToolbar 
+          ? 'translate-y-0 md:-translate-y-1/2 opacity-100 max-h-[500px] p-3 md:py-5 md:px-3' 
+          : '-translate-y-full md:-translate-x-[150%] md:-translate-y-1/2 opacity-0 pointer-events-none max-h-0 p-0 border-b-0 overflow-hidden'
+      }`}>
         
-        {/* LOGO FOR MOBILE */}
-        <div className="md:hidden flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 flex items-center justify-center shadow-sm">
-            <Sparkles className="w-3.5 h-3.5 text-white" />
+        {/* LOGO FOR MOBILE (Hidden when toolbar is collapsed) */}
+        {showToolbar && (
+          <div className="md:hidden flex items-center gap-2">
+            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 flex items-center justify-center shadow-sm">
+              <Sparkles className="w-3.5 h-3.5 text-white" />
+            </div>
+            <span className="text-xs font-bold tracking-wider">CanvasCraft</span>
           </div>
-          <span className="text-xs font-bold tracking-wider">CanvasCraft</span>
-        </div>
+        )}
 
         <div className="flex md:flex-col gap-2 items-center">
           {/* Line-Art Pen */}
@@ -520,6 +664,15 @@ export default function App() {
           >
             <EraserIcon className="w-5 h-5" />
           </button>
+
+          {/* Hand Tool (Pan/Zoom) */}
+          <button
+            onClick={() => setTool('hand')}
+            className={`p-2.5 rounded-xl cursor-pointer glass-btn ${tool === 'hand' ? 'glass-btn-active scale-105' : ''}`}
+            title="Pan & Zoom Mode (โหมดซูม/ย้าย)"
+          >
+            <Hand className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Small spacer on desktop */}
@@ -537,19 +690,45 @@ export default function App() {
 
       {/* CANVAS CONTAINER WRAPPER */}
       <main className="flex-1 min-h-[350px] md:min-h-0 h-full flex items-center justify-center p-3 md:p-6 overflow-hidden relative">
+        {/* Reset View & Zoom Percent Overlay */}
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-2 py-1.5 px-3 rounded-full glass-panel border border-slate-800 shadow-md">
+          <span className="text-xs font-semibold text-sky-400">{Math.round(zoom * 100)}%</span>
+          <button
+            onClick={resetView}
+            className="p-1 rounded-md hover:bg-slate-900/50 hover:text-sky-400 transition-colors duration-150 cursor-pointer"
+            title="Reset Zoom & Pan"
+          >
+            <Maximize className="w-3.5 h-3.5 text-slate-300" />
+          </button>
+        </div>
+
+        {/* Dynamic panning instruction hint (only in hand mode) */}
+        {tool === 'hand' && (
+          <div className="absolute bottom-4 left-4 z-20 hidden sm:flex items-center gap-1.5 py-1 px-3.5 rounded-full bg-slate-900/90 border border-slate-800 text-[10px] text-slate-400 pointer-events-none select-none animate-in fade-in slide-in-from-bottom-2 duration-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" />
+            Drag with 1 finger/mouse to Pan | Pinch with 2 fingers to Zoom
+          </div>
+        )}
+
         <div 
           className="relative max-w-full max-h-full aspect-[3/2] flex items-center justify-center" 
           ref={containerRef}
         >
           {/* Floating dynamic Canvas container with correct background */}
-          <div className={`w-full h-full rounded-2xl overflow-hidden shadow-2xl transition-all duration-300 border border-slate-700/40 relative ${canvasBgClass}`}>
+          <div 
+            className={`w-full h-full rounded-2xl overflow-hidden shadow-2xl transition-colors duration-300 border border-slate-700/40 relative ${canvasBgClass}`}
+            style={{
+              transform: `translate(${panX}px, ${panY}px) scale(${zoom})`,
+              transformOrigin: 'center center'
+            }}
+          >
             <canvas
               ref={canvasRef}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerUp}
-              className="w-full h-full block cursor-crosshair"
+              className={`w-full h-full block ${tool === 'hand' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
               style={{ touchAction: 'none' }}
             />
           </div>
@@ -571,12 +750,13 @@ export default function App() {
               {tool === 'blend' && 'Blending'}
               {tool === 'bucket' && 'Bucket Fill'}
               {tool === 'eraser' && 'Eraser'}
+              {tool === 'hand' && 'Pan & Zoom'}
             </div>
           </div>
 
           <div className="space-y-4">
             {/* Size Slider */}
-            {tool !== 'bucket' && (
+            {tool !== 'bucket' && tool !== 'hand' && (
               <div>
                 <div className="flex justify-between text-xs mb-1">
                   <span className="text-slate-400">Brush Size</span>
@@ -628,7 +808,7 @@ export default function App() {
             )}
 
             {/* Dynamic Brush Preview Indicator */}
-            {tool !== 'bucket' && (
+            {tool !== 'bucket' && tool !== 'hand' && (
               <div className="flex items-center gap-3 p-3 bg-slate-900/50 rounded-xl border border-slate-800">
                 <span className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Tip Preview</span>
                 <div className="flex-1 flex justify-center items-center h-12 bg-slate-950/40 rounded-lg relative overflow-hidden checkerboard-bg">
@@ -655,7 +835,7 @@ export default function App() {
         <div className="w-full h-[1px] bg-slate-800" />
 
         {/* SECTION 2: PALETTES & COLOR PICKER */}
-        {tool !== 'eraser' && (
+        {tool !== 'eraser' && tool !== 'hand' && (
           <div className="flex flex-col gap-3">
             <div className="flex justify-between items-center">
               <span className="text-xs font-semibold text-slate-300 uppercase tracking-widest flex items-center gap-1.5">
